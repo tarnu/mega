@@ -1,0 +1,522 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, getDocs, doc, getDoc, updateDoc, onSnapshot, query, where } from 'firebase/firestore';
+
+// Die globalen Firebase-Konstanten werden vom Canvas-Environment bereitgestellt.
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Firebase-Dienste initialisieren
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+// Hauptkomponente der Anwendung
+function App() {
+  const [currentView, setCurrentView] = useState('list'); // 'list', 'create', 'detail'
+  const [selectedChallenge, setSelectedChallenge] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [challenges, setChallenges] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [message, setMessage] = useState(''); // Für Benachrichtigungen an den Benutzer
+
+  // Firebase Authentifizierung und Firestore-Listener einrichten
+  useEffect(() => {
+    const setupFirebase = async () => {
+      try {
+        if (initialAuthToken) {
+          await signInWithCustomToken(auth, initialAuthToken);
+        } else {
+          await signInAnonymously(auth);
+        }
+
+        // Auth State Listener
+        const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+          if (user) {
+            setUserId(user.uid);
+            setIsAuthReady(true); // Setze auf true, sobald die Authentifizierung abgeschlossen ist
+          } else {
+            setUserId(null);
+            setIsAuthReady(true);
+          }
+        });
+        return () => unsubscribeAuth();
+      } catch (err) {
+        console.error("Fehler bei der Firebase-Authentifizierung:", err);
+        setError("Fehler bei der Firebase-Authentifizierung: " + err.message);
+        setLoading(false);
+        setIsAuthReady(true);
+      }
+    };
+
+    setupFirebase();
+  }, []); // Leeres Array bedeutet, dass dieser Effekt nur einmal beim Mounten ausgeführt wird
+
+  // Firestore-Listener für Herausforderungen
+  useEffect(() => {
+    if (!isAuthReady || !userId) return; // Warte, bis Auth bereit ist und userId gesetzt ist
+
+    // Pfad für öffentliche Daten
+    const challengesCollectionRef = collection(db, `artifacts/${appId}/public/data/challenges`);
+    const q = query(challengesCollectionRef);
+
+    const unsubscribeChallenges = onSnapshot(q, (snapshot) => {
+      const challengesData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setChallenges(challengesData);
+      setLoading(false);
+    }, (err) => {
+      console.error("Fehler beim Abrufen der Herausforderungen:", err);
+      setError("Fehler beim Laden der Herausforderungen: " + err.message);
+      setLoading(false);
+    });
+
+    return () => unsubscribeChallenges();
+  }, [isAuthReady, userId]); // Abhängigkeiten: Auth-Status und userId
+
+  // Hilfsfunktion zum Anzeigen von Nachrichten
+  const showMessage = (msg) => {
+    setMessage(msg);
+    setTimeout(() => setMessage(''), 3000); // Nachricht nach 3 Sekunden ausblenden
+  };
+
+  // Ansicht für die Liste der Herausforderungen
+  const ChallengeList = () => {
+    if (loading) {
+      return <div className="text-center text-lg text-gray-600">Herausforderungen werden geladen...</div>;
+    }
+
+    if (error) {
+      return <div className="text-center text-red-500 text-lg">Fehler: {error}</div>;
+    }
+
+    return (
+      <div className="p-4 sm:p-6 lg:p-8">
+        <h2 className="text-3xl font-bold text-center text-gray-800 mb-8">Aktuelle Herausforderungen</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          {challenges.length === 0 ? (
+            <p className="col-span-full text-center text-gray-500">Noch keine Herausforderungen. Seien Sie der Erste, der eine erstellt!</p>
+          ) : (
+            challenges.map((challenge) => (
+              <div
+                key={challenge.id}
+                className="bg-white rounded-xl shadow-lg hover:shadow-xl transition-shadow duration-300 cursor-pointer p-4 flex flex-col justify-between"
+                onClick={() => {
+                  setSelectedChallenge(challenge);
+                  setCurrentView('detail');
+                }}
+              >
+                <div>
+                  <h3 className="text-xl font-semibold text-gray-900 mb-2">{challenge.title}</h3>
+                  <p className="text-gray-600 text-sm mb-3 line-clamp-3">{challenge.description}</p>
+                  <div className="w-full h-32 bg-gray-200 rounded-lg flex items-center justify-center overflow-hidden mb-3">
+                    {/* Placeholder for video thumbnail */}
+                    {challenge.videoUrl ? (
+                      <video src={challenge.videoUrl} controls={false} className="w-full h-full object-cover rounded-lg"></video>
+                    ) : (
+                      <span className="text-gray-500 text-sm">Video-Platzhalter</span>
+                    )}
+                  </div>
+                </div>
+                <div className="text-xs text-gray-500">
+                  <p>Erstellt von: {challenge.userId ? challenge.userId.substring(0, 8) + '...' : 'Unbekannt'}</p>
+                  <p>Status: <span className={`font-medium ${challenge.status === 'open' ? 'text-blue-600' : challenge.status === 'completed' ? 'text-green-600' : 'text-red-600'}`}>{challenge.status === 'open' ? 'Offen' : challenge.status === 'completed' ? 'Abgeschlossen' : 'Fehlgeschlagen'}</span></p>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // Ansicht zum Erstellen einer neuen Herausforderung
+  const CreateChallenge = () => {
+    const [title, setTitle] = useState('');
+    const [description, setDescription] = useState('');
+    const [videoUrl, setVideoUrl] = useState(''); // Simulierter Video-Upload
+
+    const handleSubmit = async (e) => {
+      e.preventDefault();
+      if (!userId) {
+        showMessage("Sie müssen angemeldet sein, um eine Herausforderung zu erstellen.");
+        return;
+      }
+      if (!title || !description) {
+        showMessage("Titel und Beschreibung sind erforderlich.");
+        return;
+      }
+
+      try {
+        setLoading(true);
+        const challengesCollectionRef = collection(db, `artifacts/${appId}/public/data/challenges`);
+        await addDoc(challengesCollectionRef, {
+          userId: userId,
+          title: title,
+          description: description,
+          // Added a real video example URL here if videoUrl is not provided
+          videoUrl: videoUrl || 'https://www.learningcontainer.com/wp-content/uploads/2020/05/sample-mp4-file.mp4',
+          status: 'open',
+          createdAt: new Date(),
+        });
+        showMessage("Herausforderung erfolgreich erstellt!");
+        setTitle('');
+        setDescription('');
+        setVideoUrl('');
+        setLoading(false);
+        setCurrentView('list'); // Zurück zur Liste nach dem Erstellen
+      } catch (err) {
+        console.error("Fehler beim Erstellen der Herausforderung:", err);
+        setError("Fehler beim Erstellen der Herausforderung: " + err.message);
+        setLoading(false);
+      }
+    };
+
+    return (
+      <div className="p-4 sm:p-6 lg:p-8 max-w-2xl mx-auto bg-white rounded-xl shadow-lg mt-8">
+        <h2 className="text-3xl font-bold text-center text-gray-800 mb-8">Neue Herausforderung erstellen</h2>
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div>
+            <label htmlFor="title" className="block text-sm font-medium text-gray-700 mb-1">Titel der Herausforderung</label>
+            <input
+              type="text"
+              id="title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+              required
+            />
+          </div>
+          <div>
+            <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-1">Beschreibung</label>
+            <textarea
+              id="description"
+              rows="4"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+              required
+            ></textarea>
+          </div>
+          <div>
+            <label htmlFor="videoUrl" className="block text-sm font-medium text-gray-700 mb-1">Video-URL (Platzhalter)</label>
+            <input
+              type="url"
+              id="videoUrl"
+              value={videoUrl}
+              onChange={(e) => setVideoUrl(e.target.value)}
+              placeholder="https://example.com/your-video.mp4"
+              className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+            />
+            <p className="text-xs text-gray-500 mt-1">Hinweis: Für eine echte App würde hier eine Video-Upload-Funktion integriert.</p>
+          </div>
+          <div>
+            <button
+              type="submit"
+              className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-lg font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out"
+              disabled={loading}
+            >
+              {loading ? 'Wird erstellt...' : 'Herausforderung erstellen'}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  };
+
+  // Ansicht für die Details einer Herausforderung und das Wetten
+  const ChallengeDetail = () => {
+    const [bets, setBets] = useState([]);
+    const [userBet, setUserBet] = useState(null);
+    const [bettingDisabled, setBettingDisabled] = useState(false);
+    const [showConfirmModal, setShowConfirmModal] = useState(false);
+    const [confirmAction, setConfirmAction] = useState(null); // 'complete' or 'fail'
+
+    // Listener für Wetten zu dieser spezifischen Herausforderung
+    useEffect(() => {
+      if (!selectedChallenge?.id) return;
+
+      const betsCollectionRef = collection(db, `artifacts/${appId}/public/data/bets`);
+      const q = query(betsCollectionRef, where('challengeId', '==', selectedChallenge.id));
+
+      const unsubscribeBets = onSnapshot(q, (snapshot) => {
+        const betsData = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setBets(betsData);
+        // Prüfe, ob der aktuelle Benutzer bereits gewettet hat
+        const existingBet = betsData.find(bet => bet.userId === userId);
+        if (existingBet) {
+          setUserBet(existingBet.prediction);
+          setBettingDisabled(true); // Deaktiviere Wetten, wenn der Benutzer bereits gewettet hat
+        } else {
+          setUserBet(null);
+          setBettingDisabled(false);
+        }
+        // Deaktiviere Wetten, wenn die Herausforderung abgeschlossen oder fehlgeschlagen ist
+        if (selectedChallenge.status !== 'open') {
+          setBettingDisabled(true);
+        }
+
+      }, (err) => {
+        console.error("Fehler beim Abrufen der Wetten:", err);
+        showMessage("Fehler beim Laden der Wetten: " + err.message);
+      });
+
+      return () => unsubscribeBets();
+    }, [selectedChallenge, userId]);
+
+    // Funktion zum Platzieren einer Wette
+    const placeBet = async (prediction) => {
+      if (!userId) {
+        showMessage("Sie müssen angemeldet sein, um zu wetten.");
+        return;
+      }
+      if (selectedChallenge.status !== 'open') {
+        showMessage("Diese Herausforderung ist nicht mehr offen für Wetten.");
+        return;
+      }
+      if (userBet !== null) {
+        showMessage("Sie haben bereits auf diese Herausforderung gewettet.");
+        return;
+      }
+
+      try {
+        const betsCollectionRef = collection(db, `artifacts/${appId}/public/data/bets`);
+        await addDoc(betsCollectionRef, {
+          challengeId: selectedChallenge.id,
+          userId: userId,
+          prediction: prediction,
+          createdAt: new Date(),
+        });
+        showMessage(`Sie haben auf ${prediction ? 'Erfolg' : 'Misserfolg'} gewettet!`);
+        setUserBet(prediction); // Aktualisiere den lokalen Zustand des Benutzer-Wette
+        setBettingDisabled(true);
+      } catch (err) {
+        console.error("Fehler beim Platzieren der Wette:", err);
+        showMessage("Fehler beim Platzieren der Wette: " + err.message);
+      }
+    };
+
+    // Funktion zum Abschließen einer Herausforderung
+    const finalizeChallenge = async (status) => {
+      try {
+        const challengeRef = doc(db, `artifacts/${appId}/public/data/challenges`, selectedChallenge.id);
+        await updateDoc(challengeRef, { status: status });
+        showMessage(`Herausforderung als '${status === 'completed' ? 'erfolgreich' : 'fehlgeschlagen'}' markiert.`);
+        setSelectedChallenge({ ...selectedChallenge, status: status }); // Lokalen Zustand aktualisieren
+        setBettingDisabled(true);
+        setShowConfirmModal(false);
+      } catch (err) {
+        console.error("Fehler beim Abschließen der Herausforderung:", err);
+        showMessage("Fehler beim Abschließen der Herausforderung: " + err.message);
+      }
+    };
+
+    const confirmFinalize = (action) => {
+      setConfirmAction(action);
+      setShowConfirmModal(true);
+    };
+
+    const successfulBets = bets.filter(bet => bet.prediction === true).length;
+    const failedBets = bets.filter(bet => bet.prediction === false).length;
+
+    if (!selectedChallenge) {
+      return <div className="text-center text-red-500 text-lg">Keine Herausforderung ausgewählt.</div>;
+    }
+
+    return (
+      <div className="p-4 sm:p-6 lg:p-8 max-w-4xl mx-auto bg-white rounded-xl shadow-lg mt-8">
+        <button
+          onClick={() => setCurrentView('list')}
+          className="mb-4 text-blue-600 hover:text-blue-800 flex items-center"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+          </svg>
+          Zurück zur Liste
+        </button>
+
+        <h2 className="text-4xl font-extrabold text-gray-900 text-center mb-6">{selectedChallenge.title}</h2>
+        <p className="text-gray-700 text-lg mb-6 leading-relaxed">{selectedChallenge.description}</p>
+
+        <div className="w-full bg-gray-200 rounded-xl overflow-hidden mb-6 aspect-video">
+          {/* Simuliertes Video-Element */}
+          <video src={selectedChallenge.videoUrl} controls className="w-full h-full object-contain"></video>
+        </div>
+
+        <div className="text-sm text-gray-500 mb-4 flex justify-between items-center">
+          <span>Erstellt von: {selectedChallenge.userId ? selectedChallenge.userId.substring(0, 8) + '...' : 'Unbekannt'}</span>
+          <span>Status: <span className={`font-semibold ${selectedChallenge.status === 'open' ? 'text-blue-600' : selectedChallenge.status === 'completed' ? 'text-green-600' : 'text-red-600'}`}>{selectedChallenge.status === 'open' ? 'Offen' : selectedChallenge.status === 'completed' ? 'Abgeschlossen' : 'Fehlgeschlagen'}</span></span>
+        </div>
+
+        {/* Wett-Bereich */}
+        <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-6">
+          <h3 className="text-2xl font-semibold text-gray-800 mb-4">Wetten</h3>
+          <div className="flex justify-around items-center mb-4">
+            <div className="text-center">
+              <p className="text-3xl font-bold text-green-600">{successfulBets}</p>
+              <p className="text-gray-600">Wetten auf Erfolg</p>
+            </div>
+            <div className="text-center">
+              <p className="text-3xl font-bold text-red-600">{failedBets}</p>
+              <p className="text-gray-600">Wetten auf Misserfolg</p>
+            </div>
+          </div>
+
+          {selectedChallenge.status === 'open' && (
+            <div className="mt-4">
+              {bettingDisabled ? (
+                <p className="text-center text-lg text-gray-700">
+                  Sie haben bereits gewettet: <span className={`font-semibold ${userBet ? 'text-green-600' : 'text-red-600'}`}>
+                    {userBet ? 'Erfolg' : 'Misserfolg'}
+                  </span>
+                </p>
+              ) : (
+                <div className="flex gap-4 justify-center">
+                  <button
+                    onClick={() => placeBet(true)}
+                    className="flex-1 py-3 px-6 bg-green-500 text-white rounded-lg shadow-md hover:bg-green-600 transition-all duration-200 text-lg font-semibold transform hover:scale-105"
+                  >
+                    Wette: Erfolg
+                  </button>
+                  <button
+                    onClick={() => placeBet(false)}
+                    className="flex-1 py-3 px-6 bg-red-500 text-white rounded-lg shadow-md hover:bg-red-600 transition-all duration-200 text-lg font-semibold transform hover:scale-105"
+                  >
+                    Wette: Misserfolg
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+          {selectedChallenge.status !== 'open' && (
+            <p className="text-center text-lg text-gray-700 mt-4">
+              Die Wetten für diese Herausforderung sind abgeschlossen.
+            </p>
+          )}
+        </div>
+
+        {/* Challenge-Besitzer-Aktionen */}
+        {userId === selectedChallenge.userId && selectedChallenge.status === 'open' && (
+          <div className="bg-blue-50 p-6 rounded-lg shadow-inner mt-6">
+            <h3 className="text-2xl font-semibold text-blue-800 mb-4">Herausforderung abschließen (als Ersteller)</h3>
+            <p className="text-gray-700 mb-4">Markieren Sie diese Herausforderung als erfolgreich oder fehlgeschlagen.</p>
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={() => confirmFinalize('completed')}
+                className="flex-1 py-3 px-6 bg-indigo-600 text-white rounded-lg shadow-md hover:bg-indigo-700 transition-all duration-200 text-lg font-semibold transform hover:scale-105"
+              >
+                Als Erfolg markieren
+              </button>
+              <button
+                onClick={() => confirmFinalize('failed')}
+                className="flex-1 py-3 px-6 bg-orange-600 text-white rounded-lg shadow-md hover:bg-orange-700 transition-all duration-200 text-lg font-semibold transform hover:scale-105"
+              >
+                Als Misserfolg markieren
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Bestätigungsmodal */}
+        {showConfirmModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg p-6 shadow-xl max-w-sm w-full">
+              <h3 className="text-xl font-semibold text-gray-900 mb-4">Aktion bestätigen</h3>
+              <p className="text-gray-700 mb-6">
+                Möchten Sie die Herausforderung wirklich als {' '}
+                <span className="font-bold">
+                  {confirmAction === 'completed' ? 'erfolgreich' : 'fehlgeschlagen'}
+                </span> markieren? Diese Aktion kann nicht rückgängig gemacht werden und schließt die Wetten.
+              </p>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setShowConfirmModal(false)}
+                  className="py-2 px-4 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100 transition duration-150 ease-in-out"
+                >
+                  Abbrechen
+                </button>
+                <button
+                  onClick={() => finalizeChallenge(confirmAction)}
+                  className={`py-2 px-4 rounded-md text-white font-medium ${confirmAction === 'completed' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-orange-600 hover:bg-orange-700'} transition duration-150 ease-in-out`}
+                >
+                  Bestätigen
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Render der Hauptansicht basierend auf currentView
+  const renderView = () => {
+    switch (currentView) {
+      case 'list':
+        return <ChallengeList />;
+      case 'create':
+        return <CreateChallenge />;
+      case 'detail':
+        return <ChallengeDetail />;
+      default:
+        return <ChallengeList />;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-100 font-sans antialiased text-gray-900">
+      <style>
+        {`
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+          body {
+            font-family: 'Inter', sans-serif;
+          }
+        `}
+      </style>
+      <header className="bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-md py-4 px-6 sm:px-8 lg:px-10 flex flex-col sm:flex-row justify-between items-center rounded-b-xl">
+        <h1 className="text-4xl font-extrabold mb-2 sm:mb-0">Challenger Master</h1>
+        <nav className="flex space-x-4">
+          <button
+            onClick={() => setCurrentView('list')}
+            className={`py-2 px-4 rounded-full text-lg font-medium transition-colors duration-200 ${currentView === 'list' ? 'bg-white text-blue-600 shadow-lg' : 'text-white hover:bg-blue-700 hover:bg-opacity-50'}`}
+          >
+            Herausforderungen
+          </button>
+          <button
+            onClick={() => setCurrentView('create')}
+            className={`py-2 px-4 rounded-full text-lg font-medium transition-colors duration-200 ${currentView === 'create' ? 'bg-white text-purple-600 shadow-lg' : 'text-white hover:bg-purple-700 hover:bg-opacity-50'}`}
+          >
+            Erstellen
+          </button>
+        </nav>
+      </header>
+
+      {/* Benutzer-ID und Nachrichtenanzeige */}
+      <div className="container mx-auto p-4 flex justify-between items-center">
+        <div className="text-gray-600 text-sm">
+          Ihre Benutzer-ID: <span className="font-mono bg-gray-200 px-2 py-1 rounded text-xs">{userId || 'Wird geladen...'}</span>
+        </div>
+        {message && (
+          <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-2 rounded relative text-sm" role="alert">
+            {message}
+          </div>
+        )}
+      </div>
+
+      <main className="container mx-auto py-8 px-4">
+        {renderView()}
+      </main>
+    </div>
+  );
+}
+
+export default App;
